@@ -252,7 +252,7 @@ def _safe_embed_image(ws, product: Product, row: int) -> bool:
     if image_path.startswith(("http://", "https://")):
         image_path = download_image(image_path)
     # Amazon-style bare filename (e.g. "41jyPkgADtL.jpg") — try Amazon CDN
-    elif re.match(r'^[A-Z0-9]{8,}\.(jpg|jpeg|png|webp)$', image_path, re.IGNORECASE):
+    elif re.match(r'^[A-Za-z0-9+\-_]{5,}\.(jpg|jpeg|png|webp)$', image_path):
         image_path = download_image(f"https://m.media-amazon.com/images/I/{image_path}")
 
     if not image_path or not os.path.exists(image_path):

@@ -433,7 +433,7 @@ with tab_excel:
                                         if local:
                                             p._image_local_path = local
                                             imgs_found += 1
-                                    elif re.match(r'^[A-Z0-9]{8,}\.(jpg|jpeg|png|webp)$', img_val, re.IGNORECASE):
+                                    elif re.match(r'^[A-Za-z0-9+\-_]{5,}\.(jpg|jpeg|png|webp)$', img_val):
                                         # Amazon-style image filename — try Amazon CDN
                                         amazon_url = f"https://m.media-amazon.com/images/I/{img_val}"
                                         local = download_image(amazon_url)
