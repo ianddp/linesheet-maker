@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -245,9 +246,14 @@ def _safe_embed_image(ws, product: Product, row: int) -> bool:
     if not image_path:
         return False
 
+    image_path = image_path.strip()
+
     # Download if URL
     if image_path.startswith(("http://", "https://")):
         image_path = download_image(image_path)
+    # Amazon-style bare filename (e.g. "41jyPkgADtL.jpg") — try Amazon CDN
+    elif re.match(r'^[A-Z0-9]{8,}\.(jpg|jpeg|png|webp)$', image_path, re.IGNORECASE):
+        image_path = download_image(f"https://m.media-amazon.com/images/I/{image_path}")
 
     if not image_path or not os.path.exists(image_path):
         return False

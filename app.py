@@ -5,6 +5,7 @@ Ingest products from websites, PDFs, or Excel/CSV files and export polished line
 from __future__ import annotations
 
 import os
+import re
 import sys
 import io
 import json
@@ -420,8 +421,31 @@ with tab_excel:
                         st.session_state.products = []
                         products = apply_mapping(df, mapping)
                         if products:
+                            # Download images for any products that have URLs or Amazon image IDs
+                            imgs_found = 0
+                            with st.spinner("Fetching images..."):
+                                for p in products:
+                                    if not p.product_image:
+                                        continue
+                                    img_val = p.product_image.strip()
+                                    if img_val.startswith(("http://", "https://")):
+                                        local = download_image(img_val)
+                                        if local:
+                                            p._image_local_path = local
+                                            imgs_found += 1
+                                    elif re.match(r'^[A-Z0-9]{8,}\.(jpg|jpeg|png|webp)$', img_val, re.IGNORECASE):
+                                        # Amazon-style image filename — try Amazon CDN
+                                        amazon_url = f"https://m.media-amazon.com/images/I/{img_val}"
+                                        local = download_image(amazon_url)
+                                        if local:
+                                            p._image_local_path = local
+                                            p.product_image = amazon_url
+                                            imgs_found += 1
                             add_products(products)
-                            st.success(f"Imported {len(products)} product(s) from {excel_file.name}.")
+                            msg = f"Imported {len(products)} product(s) from {excel_file.name}."
+                            if imgs_found:
+                                msg += f" Downloaded {imgs_found} image(s)."
+                            st.success(msg)
                         else:
                             st.warning("No valid product rows found with the selected mapping.")
 
