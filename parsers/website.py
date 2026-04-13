@@ -24,6 +24,294 @@ def scrape_url(url: str, timeout: int = 30) -> dict:
         return {"soup": None, "html": "", "url": url, "ok": False, "error": str(e)}
 
 
+# ─────────────────────── Shopify JSON API ───────────────────────
+
+def _is_shopify(soup: BeautifulSoup, html: str) -> bool:
+    """Detect if a site is built on Shopify."""
+    indicators = [
+        'cdn.shopify.com' in html,
+        'Shopify.theme' in html,
+        'myshopify.com' in html,
+        bool(soup.find("meta", attrs={"name": "shopify-checkout-api-token"})),
+        bool(soup.find("link", href=re.compile(r'cdn\.shopify\.com'))),
+        '"shopify"' in html.lower()[:5000],
+    ]
+    return sum(indicators) >= 1
+
+
+def scrape_shopify_api(base_url: str, progress_callback=None) -> list[Product]:
+    """Scrape products via Shopify's /products.json API."""
+    parsed = urlparse(base_url)
+    shop_root = f"{parsed.scheme}://{parsed.netloc}"
+    products = []
+    page = 1
+
+    while True:
+        api_url = f"{shop_root}/products.json?limit=250&page={page}"
+        if progress_callback:
+            progress_callback(f"Fetching Shopify API page {page}...")
+        try:
+            resp = requests.get(api_url, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            break
+
+        shop_products = data.get("products", [])
+        if not shop_products:
+            break
+
+        for sp in shop_products:
+            name = sp.get("title", "")
+            vendor = sp.get("vendor", "")
+            product_type = sp.get("product_type", "")
+
+            # Get main image
+            images = sp.get("images", [])
+            main_image = images[0].get("src", "") if images else ""
+
+            # Create one Product per variant (color/size)
+            variants = sp.get("variants", [{}])
+            seen_colors = set()
+
+            for variant in variants:
+                color = ""
+                option1 = variant.get("option1", "")
+                option2 = variant.get("option2", "")
+                # Typically option1 is color, option2 is size
+                for opt in [option1, option2]:
+                    if opt and opt.lower() not in ("default title", "default", "one size", "os"):
+                        if _looks_like_color(opt):
+                            color = opt
+                            break
+
+                # Skip duplicate colors (different sizes)
+                color_key = color.lower() if color else f"_var_{variant.get('id','')}"
+                if color_key in seen_colors:
+                    continue
+                seen_colors.add(color_key)
+
+                sku = variant.get("sku", "")
+                price = variant.get("price", "")
+
+                # Find variant-specific image
+                var_image = main_image
+                var_img_id = variant.get("image_id")
+                if var_img_id and images:
+                    for img in images:
+                        if img.get("id") == var_img_id:
+                            var_image = img.get("src", main_image)
+                            break
+
+                products.append(Product(
+                    product_image=var_image,
+                    sku_upc=sku,
+                    product_name=name,
+                    color=color,
+                    msrp=f"${float(price):.2f}" if price else "",
+                    _source="website",
+                    _source_detail=f"{shop_root}/products/{sp.get('handle', '')}",
+                    _category=product_type,
+                ))
+
+        if len(shop_products) < 250:
+            break
+        page += 1
+        time.sleep(0.5)
+
+    return products
+
+
+def _looks_like_color(text: str) -> bool:
+    """Check if a string looks like a color name rather than a size."""
+    lower = text.strip().lower()
+    # Definitely a size
+    size_patterns = [
+        r'^\d+(\.\d+)?\s*(oz|ml|l|g|kg|lb|in|cm|mm|qt|gal)\.?$',
+        r'^(xs|s|m|l|xl|xxl|xxxl|2xl|3xl|one size)$',
+        r'^\d+x\d+',
+        r'^\d+\s*(piece|pc|pack|count|ct|set)s?$',
+        r'^\d+$',
+    ]
+    for pat in size_patterns:
+        if re.match(pat, lower):
+            return False
+
+    # Known colors = definitely color
+    for c in COMMON_COLORS:
+        if lower == c or lower.startswith(c):
+            return True
+
+    # If it has no digits and is short-ish, probably a color
+    if not any(ch.isdigit() for ch in text) and len(text) < 30:
+        return True
+
+    return False
+
+
+# ─────────────────── Sitemap product URL finder ───────────────────
+
+def _fetch_sitemap_product_urls(base_url: str, max_urls: int = 100) -> list[str]:
+    """Parse sitemap.xml to find product URLs."""
+    parsed = urlparse(base_url)
+    site_root = f"{parsed.scheme}://{parsed.netloc}"
+    product_urls = []
+
+    sitemap_locations = [
+        f"{site_root}/sitemap.xml",
+        f"{site_root}/sitemap_products_1.xml",
+        f"{site_root}/sitemap_index.xml",
+    ]
+
+    product_patterns = re.compile(
+        r'/(products?|shop|items?|p|catalog)/[^?#]+', re.IGNORECASE
+    )
+
+    visited = set()
+
+    for sitemap_url in sitemap_locations:
+        if sitemap_url in visited:
+            continue
+        visited.add(sitemap_url)
+
+        try:
+            resp = requests.get(sitemap_url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            sm_soup = BeautifulSoup(resp.text, "lxml-xml")
+        except Exception:
+            try:
+                resp = requests.get(sitemap_url, headers=HEADERS, timeout=15)
+                sm_soup = BeautifulSoup(resp.text, "lxml")
+            except Exception:
+                continue
+
+        # Check for sitemap index (links to other sitemaps)
+        sub_sitemaps = sm_soup.find_all("sitemap")
+        for sub in sub_sitemaps:
+            loc = sub.find("loc")
+            if loc and loc.text:
+                sub_url = loc.text.strip()
+                if "product" in sub_url.lower() and sub_url not in visited:
+                    sitemap_locations.append(sub_url)
+
+        # Extract product URLs from <url><loc>
+        for url_tag in sm_soup.find_all("url"):
+            loc = url_tag.find("loc")
+            if loc and loc.text:
+                url_text = loc.text.strip()
+                if product_patterns.search(url_text):
+                    if not _is_non_product_url(url_text):
+                        product_urls.append(url_text)
+                        if len(product_urls) >= max_urls:
+                            return product_urls
+
+    return product_urls
+
+
+# ─────────────────── Next.js __NEXT_DATA__ extraction ───────────────────
+
+def _extract_nextdata_products(soup: BeautifulSoup, page_url: str) -> list[Product]:
+    """Extract products from Next.js __NEXT_DATA__ script tag."""
+    script = soup.find("script", id="__NEXT_DATA__")
+    if not script or not script.string:
+        return []
+
+    try:
+        data = json.loads(script.string)
+    except json.JSONDecodeError:
+        return []
+
+    products = []
+    # Recursively search for product-like objects
+    _find_products_in_data(data, products, page_url, depth=0)
+    return products
+
+
+def _find_products_in_data(obj, products: list, page_url: str, depth: int):
+    """Recursively find product data in nested JSON structures."""
+    if depth > 10:
+        return
+
+    if isinstance(obj, dict):
+        # Check if this dict looks like a product
+        has_name = any(k in obj for k in ("name", "title", "productName", "product_name"))
+        has_price = any(k in obj for k in ("price", "msrp", "amount", "salePrice", "retailPrice"))
+        has_image = any(k in obj for k in ("image", "images", "imageUrl", "image_url", "thumbnail"))
+
+        if has_name and (has_price or has_image):
+            name = obj.get("name") or obj.get("title") or obj.get("productName") or obj.get("product_name", "")
+            if isinstance(name, str) and len(name) > 2:
+                # Extract image
+                image = ""
+                for key in ("image", "imageUrl", "image_url", "thumbnail", "primaryImage"):
+                    val = obj.get(key)
+                    if isinstance(val, str) and val:
+                        image = val if val.startswith("http") else urljoin(page_url, val)
+                        break
+                    elif isinstance(val, list) and val:
+                        first = val[0]
+                        if isinstance(first, str):
+                            image = first if first.startswith("http") else urljoin(page_url, first)
+                        elif isinstance(first, dict):
+                            image = first.get("src") or first.get("url") or ""
+                            if image and not image.startswith("http"):
+                                image = urljoin(page_url, image)
+                        break
+                    elif isinstance(val, dict):
+                        image = val.get("src") or val.get("url") or ""
+                        if image and not image.startswith("http"):
+                            image = urljoin(page_url, image)
+                        break
+
+                # Extract images list
+                if not image:
+                    imgs = obj.get("images", [])
+                    if isinstance(imgs, list) and imgs:
+                        first = imgs[0]
+                        if isinstance(first, str):
+                            image = first
+                        elif isinstance(first, dict):
+                            image = first.get("src") or first.get("url") or ""
+
+                # Extract price
+                price = ""
+                for key in ("price", "msrp", "retailPrice", "salePrice", "amount"):
+                    val = obj.get(key)
+                    if val is not None:
+                        if isinstance(val, dict):
+                            price = str(val.get("amount") or val.get("value") or "")
+                        elif isinstance(val, (int, float)):
+                            price = f"${val:.2f}"
+                        elif isinstance(val, str) and val:
+                            price = val
+                        if price:
+                            break
+
+                sku = str(obj.get("sku") or obj.get("productId") or obj.get("id") or "")
+                color = obj.get("color") or obj.get("colorName") or ""
+                if isinstance(color, dict):
+                    color = color.get("name") or color.get("label") or ""
+
+                products.append(Product(
+                    product_image=image,
+                    sku_upc=sku,
+                    product_name=str(name),
+                    color=str(color),
+                    msrp=str(price),
+                    _source="website",
+                    _source_detail=page_url,
+                ))
+                return  # Don't recurse into this product's children
+
+        # Recurse into all values
+        for v in obj.values():
+            _find_products_in_data(v, products, page_url, depth + 1)
+
+    elif isinstance(obj, list):
+        for item in obj:
+            _find_products_in_data(item, products, page_url, depth + 1)
+
+
 def extract_jsonld_products(soup: BeautifulSoup, page_url: str) -> list[Product]:
     """Extract products from JSON-LD structured data (schema.org/Product)."""
     products = []
@@ -138,10 +426,10 @@ def extract_og_product(soup: BeautifulSoup, page_url: str) -> Product | None:
     )
 
 
-def extract_products_from_page(soup: BeautifulSoup, page_url: str) -> list[Product]:
+def extract_products_from_page(soup: BeautifulSoup, page_url: str, html: str = "") -> list[Product]:
     """
     Extract products from a single page using multiple strategies.
-    Priority: JSON-LD > OG tags > HTML patterns.
+    Priority: JSON-LD > Next.js data > OG tags > HTML patterns.
     """
     products = []
 
@@ -150,13 +438,19 @@ def extract_products_from_page(soup: BeautifulSoup, page_url: str) -> list[Produ
     if jsonld_products:
         products.extend(jsonld_products)
 
-    # Strategy 2: Open Graph tags (if no JSON-LD found)
+    # Strategy 2: Next.js __NEXT_DATA__
+    if not products:
+        next_products = _extract_nextdata_products(soup, page_url)
+        if next_products:
+            products.extend(next_products)
+
+    # Strategy 3: Open Graph tags (if no JSON-LD found)
     if not products:
         og_product = extract_og_product(soup, page_url)
         if og_product:
             products.append(og_product)
 
-    # Strategy 3: HTML pattern matching for product detail pages
+    # Strategy 4: HTML pattern matching for product detail pages
     if not products:
         html_product = _extract_from_html_patterns(soup, page_url)
         if html_product:
@@ -469,17 +763,25 @@ def scrape_website(url: str, progress_callback=None) -> list[Product]:
         return []
 
     all_products = []
+    soup = result["soup"]
+    html = result["html"]
 
-    # Find collection pages
-    collection_links = find_collection_links(result["soup"], result["url"])
+    # ── Strategy A: Shopify JSON API (most reliable for Shopify stores) ──
+    if _is_shopify(soup, html):
+        if progress_callback:
+            progress_callback("Shopify store detected! Using product API...")
+        shopify_products = scrape_shopify_api(result["url"], progress_callback)
+        if shopify_products:
+            return shopify_products
 
-    # Also check if the landing page itself has products
-    landing_products = extract_products_from_page(result["soup"], result["url"])
+    # ── Strategy B: Extract from landing page ──
+    landing_products = extract_products_from_page(soup, result["url"], html)
     all_products.extend(landing_products)
 
-    # Scrape each collection
+    # ── Strategy C: Find and scrape collection pages ──
+    collection_links = find_collection_links(soup, result["url"])
     if collection_links:
-        for coll_url in collection_links[:20]:  # Limit to 20 collections
+        for coll_url in collection_links[:20]:
             if progress_callback:
                 progress_callback(f"Scanning collection: {coll_url}")
             try:
@@ -489,11 +791,11 @@ def scrape_website(url: str, progress_callback=None) -> list[Product]:
             except Exception:
                 continue
 
-    # If no collections found, try finding product links on main page
+    # ── Strategy D: Find product links on main page ──
     if not collection_links:
-        product_links = find_product_links(result["soup"], result["url"])
+        product_links = find_product_links(soup, result["url"])
         total = len(product_links)
-        for i, link in enumerate(product_links[:50]):  # Limit to 50 products
+        for i, link in enumerate(product_links[:50]):
             if progress_callback:
                 progress_callback(f"Scraping product {i+1}/{min(total,50)}: {link}")
             try:
@@ -502,6 +804,23 @@ def scrape_website(url: str, progress_callback=None) -> list[Product]:
                 time.sleep(0.5)
             except Exception:
                 continue
+
+    # ── Strategy E: Sitemap fallback (if we still have nothing) ──
+    if not all_products:
+        if progress_callback:
+            progress_callback("Trying sitemap.xml for product URLs...")
+        sitemap_urls = _fetch_sitemap_product_urls(result["url"])
+        if sitemap_urls:
+            total = len(sitemap_urls)
+            for i, purl in enumerate(sitemap_urls[:50]):
+                if progress_callback:
+                    progress_callback(f"Scraping sitemap product {i+1}/{min(total,50)}")
+                try:
+                    page_products = scrape_single_product(purl)
+                    all_products.extend(page_products)
+                    time.sleep(0.5)
+                except Exception:
+                    continue
 
     return all_products
 
