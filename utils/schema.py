@@ -30,7 +30,7 @@ class Product:
         """Return only the columns that go into the line sheet."""
         return {
             "Product Image": self.product_image,
-            "SKU / UPC": self.sku_upc,
+            "UPC/SKU/ASIN": self.sku_upc,
             "Product Name": self.product_name,
             "Color": self.color,
             "MSRP": self.msrp,
@@ -43,7 +43,7 @@ class Product:
 # The exact export column order
 EXPORT_COLUMNS = [
     "Product Image",
-    "SKU / UPC",
+    "UPC/SKU/ASIN",
     "Product Name",
     "Color",
     "MSRP",
@@ -71,9 +71,10 @@ COLUMN_ALIASES = {
         "image_url", "photo_url", "thumbnail", "main image",
     ],
     "sku_upc": [
-        "sku", "upc", "style", "style number", "style #", "style no",
+        "sku", "upc", "asin", "style", "style number", "style #", "style no",
         "item number", "item #", "item no", "barcode", "ean", "gtin",
         "product code", "code", "article", "article number", "model",
+        "upc/sku/asin", "sku/upc", "upc/sku",
     ],
     "product_name": [
         "name", "product name", "product", "title", "product title",

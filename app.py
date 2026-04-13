@@ -182,7 +182,7 @@ def products_to_df() -> pd.DataFrame:
     for p in st.session_state.products:
         rows.append({
             "Product Image": p.product_image,
-            "SKU / UPC": p.sku_upc,
+            "UPC/SKU/ASIN": p.sku_upc,
             "Product Name": p.product_name,
             "Color": p.color,
             "MSRP": p.msrp,
@@ -199,7 +199,7 @@ def df_to_products(df: pd.DataFrame) -> list[Product]:
     for _, row in df.iterrows():
         products.append(Product(
             product_image=str(row.get("Product Image", "") or ""),
-            sku_upc=str(row.get("SKU / UPC", "") or ""),
+            sku_upc=str(row.get("UPC/SKU/ASIN", "") or ""),
             product_name=str(row.get("Product Name", "") or ""),
             color=str(row.get("Color", "") or ""),
             msrp=str(row.get("MSRP", "") or ""),
@@ -536,8 +536,8 @@ if st.session_state.products:
                 help="Image URL or file path",
                 width="medium",
             ),
-            "SKU / UPC": st.column_config.TextColumn(
-                "SKU / UPC",
+            "UPC/SKU/ASIN": st.column_config.TextColumn(
+                "UPC/SKU/ASIN",
                 width="small",
             ),
             "Product Name": st.column_config.TextColumn(
