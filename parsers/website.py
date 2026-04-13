@@ -761,8 +761,12 @@ def _is_real_product(p: Product) -> bool:
     # Must have a name
     if not p.product_name:
         return False
-    # Reject if no price AND no image AND no SKU — it's just a page title
-    if not p.msrp and not p.product_image and not p.sku_upc:
+    # A real product must have at least a PRICE or an IMAGE
+    # Just having a name + URL slug SKU is not enough
+    has_price = bool(p.msrp and p.msrp.strip() and
+                     p.msrp.strip().lower() not in ("catalog", "n/a", "na", "tbd", "call"))
+    has_image = bool(p.product_image and p.product_image.startswith("http"))
+    if not has_price and not has_image:
         return False
     # Reject common non-product page titles
     reject_names = [
@@ -771,8 +775,11 @@ def _is_real_product(p: Product) -> bool:
     ]
     if p.product_name.strip().lower() in reject_names:
         return False
-    # Reject if MSRP is "Catalog" or similar non-price
-    if p.msrp and p.msrp.strip().lower() in ("catalog", "n/a", "na", "tbd", "call"):
+    # Reject URL-slug style "SKUs" (e.g. "seo-belt-pouches")
+    if p.sku_upc and re.match(r'^[a-z0-9\-]{10,}$', p.sku_upc) and '-' in p.sku_upc:
+        p.sku_upc = ""  # Clear it, don't reject the product entirely
+    # Clean non-price MSRP values
+    if not has_price:
         p.msrp = ""
     return True
 
