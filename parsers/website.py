@@ -756,6 +756,27 @@ def scrape_collection_page(url: str, progress_callback=None) -> list[Product]:
     return products
 
 
+def _is_real_product(p: Product) -> bool:
+    """Filter out category pages, navigation items, and other non-products."""
+    # Must have a name
+    if not p.product_name:
+        return False
+    # Reject if no price AND no image AND no SKU — it's just a page title
+    if not p.msrp and not p.product_image and not p.sku_upc:
+        return False
+    # Reject common non-product page titles
+    reject_names = [
+        "page not found", "404", "home", "homepage", "our partnerships",
+        "contact us", "about us", "faq", "shipping", "returns",
+    ]
+    if p.product_name.strip().lower() in reject_names:
+        return False
+    # Reject if MSRP is "Catalog" or similar non-price
+    if p.msrp and p.msrp.strip().lower() in ("catalog", "n/a", "na", "tbd", "call"):
+        p.msrp = ""
+    return True
+
+
 def scrape_website(url: str, progress_callback=None) -> list[Product]:
     """Scrape an entire website: find collections, then scrape each."""
     result = scrape_url(url)
@@ -772,13 +793,19 @@ def scrape_website(url: str, progress_callback=None) -> list[Product]:
             progress_callback("Shopify store detected! Using product API...")
         shopify_products = scrape_shopify_api(result["url"], progress_callback)
         if shopify_products:
-            return shopify_products
+            return [p for p in shopify_products if _is_real_product(p)]
 
-    # ── Strategy B: Extract from landing page ──
+    # ── Strategy B: Try sitemap early for JS-heavy sites ──
+    # (Many modern sites won't yield products from HTML alone)
+    if progress_callback:
+        progress_callback("Checking sitemap for product URLs...")
+    sitemap_urls = _fetch_sitemap_product_urls(result["url"])
+
+    # ── Strategy C: Extract from landing page ──
     landing_products = extract_products_from_page(soup, result["url"], html)
     all_products.extend(landing_products)
 
-    # ── Strategy C: Find and scrape collection pages ──
+    # ── Strategy D: Find and scrape collection pages ──
     collection_links = find_collection_links(soup, result["url"])
     if collection_links:
         for coll_url in collection_links[:20]:
@@ -791,7 +818,7 @@ def scrape_website(url: str, progress_callback=None) -> list[Product]:
             except Exception:
                 continue
 
-    # ── Strategy D: Find product links on main page ──
+    # ── Strategy E: Find product links on main page ──
     if not collection_links:
         product_links = find_product_links(soup, result["url"])
         total = len(product_links)
@@ -805,24 +832,25 @@ def scrape_website(url: str, progress_callback=None) -> list[Product]:
             except Exception:
                 continue
 
-    # ── Strategy E: Sitemap fallback (if we still have nothing) ──
-    if not all_products:
-        if progress_callback:
-            progress_callback("Trying sitemap.xml for product URLs...")
-        sitemap_urls = _fetch_sitemap_product_urls(result["url"])
-        if sitemap_urls:
-            total = len(sitemap_urls)
-            for i, purl in enumerate(sitemap_urls[:50]):
-                if progress_callback:
-                    progress_callback(f"Scraping sitemap product {i+1}/{min(total,50)}")
-                try:
-                    page_products = scrape_single_product(purl)
-                    all_products.extend(page_products)
-                    time.sleep(0.5)
-                except Exception:
-                    continue
+    # Filter to real products
+    real_products = [p for p in all_products if _is_real_product(p)]
 
-    return all_products
+    # ── Strategy F: Sitemap fallback if we don't have enough real products ──
+    if len(real_products) < 3 and sitemap_urls:
+        if progress_callback:
+            progress_callback(f"Found {len(sitemap_urls)} product URLs in sitemap, scraping...")
+        total = len(sitemap_urls)
+        for i, purl in enumerate(sitemap_urls[:50]):
+            if progress_callback:
+                progress_callback(f"Scraping sitemap product {i+1}/{min(total,50)}")
+            try:
+                page_products = scrape_single_product(purl)
+                real_products.extend([p for p in page_products if _is_real_product(p)])
+                time.sleep(0.5)
+            except Exception:
+                continue
+
+    return real_products
 
 
 # Common color names for extraction
