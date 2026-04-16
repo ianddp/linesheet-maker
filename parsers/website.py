@@ -18,6 +18,9 @@ from parsers.scraper import (
     extract_product_cards,
     filter_products,
     score_product,
+    normalize_price,
+    validate_sku,
+    extract_best_price,
     CONFIRMED_THRESHOLD,
     LIKELY_THRESHOLD,
 )
@@ -275,15 +278,16 @@ def _find_products_in_data(obj, products: list, page_url: str, depth: int):
                     val = obj.get(key)
                     if val is not None:
                         if isinstance(val, dict):
-                            price = str(val.get("amount") or val.get("value") or "")
+                            price = normalize_price(str(val.get("amount") or val.get("value") or ""))
                         elif isinstance(val, (int, float)):
-                            price = f"${val:.2f}"
+                            price = normalize_price(str(val))
                         elif isinstance(val, str) and val:
-                            price = val
+                            price = normalize_price(val)
                         if price:
                             break
 
-                sku = str(obj.get("sku") or obj.get("productId") or obj.get("id") or "")
+                raw_sku = str(obj.get("sku") or obj.get("productId") or obj.get("id") or "")
+                sku = validate_sku(raw_sku)
                 color = obj.get("color") or obj.get("colorName") or ""
                 if isinstance(color, dict):
                     color = color.get("name") or color.get("label") or ""
@@ -293,7 +297,7 @@ def _find_products_in_data(obj, products: list, page_url: str, depth: int):
                     sku_upc=sku,
                     product_name=str(name),
                     color=str(color),
-                    msrp=str(price),
+                    msrp=price,
                     _source="website",
                     _source_detail=page_url,
                 ))
@@ -357,9 +361,10 @@ def _jsonld_to_product(data: dict, page_url: str) -> Product:
     if isinstance(offers, list):
         offers = offers[0] if offers else {}
     if isinstance(offers, dict):
-        msrp = str(offers.get("price", ""))
-        if not msrp:
-            msrp = str(offers.get("highPrice", offers.get("lowPrice", "")))
+        raw_price = str(offers.get("price", ""))
+        if not raw_price:
+            raw_price = str(offers.get("highPrice", offers.get("lowPrice", "")))
+        msrp = normalize_price(raw_price)
 
     color = data.get("color", "")
     if not color:
@@ -367,7 +372,7 @@ def _jsonld_to_product(data: dict, page_url: str) -> Product:
 
     return Product(
         product_image=image,
-        sku_upc=str(sku),
+        sku_upc=validate_sku(str(sku)),
         product_name=name,
         color=color,
         msrp=msrp,
@@ -395,10 +400,10 @@ def extract_og_product(soup: BeautifulSoup, page_url: str) -> Product | None:
         "meta", property="og:price:amount"
     )
     if og_price:
-        price = og_price.get("content", "")
+        price = normalize_price(og_price.get("content", ""))
 
     sku_meta = soup.find("meta", property="product:retailer_item_id")
-    sku = sku_meta.get("content", "") if sku_meta else ""
+    sku = validate_sku(sku_meta.get("content", "") if sku_meta else "")
 
     if not name:
         return None
@@ -495,16 +500,13 @@ def _extract_from_html_patterns(soup: BeautifulSoup, page_url: str) -> Product |
     for selector in price_selectors:
         el = soup.select_one(selector)
         if el:
-            price_text = el.get_text(strip=True)
-            price_match = re.search(r'[\$£€]?\s*(\d+[.,]?\d*)', price_text)
-            if price_match:
-                price = price_match.group(0).strip()
-                break
-            if el.get("data-price"):
-                price = el["data-price"]
-                break
-            if el.get("content"):
-                price = el["content"]
+            # Try data attributes first (cleanest source)
+            data_price = el.get("data-price") or el.get("content") or ""
+            if data_price:
+                price = normalize_price(data_price)
+            if not price:
+                price = extract_best_price(el.get_text(strip=True))
+            if price:
                 break
 
     image = _find_main_product_image(soup, page_url)
@@ -517,7 +519,8 @@ def _extract_from_html_patterns(soup: BeautifulSoup, page_url: str) -> Product |
     for selector in sku_selectors:
         el = soup.select_one(selector)
         if el:
-            sku = el.get_text(strip=True)
+            raw_sku = (el.get("content") or el.get_text(strip=True)).strip()
+            sku = validate_sku(raw_sku)
             if sku:
                 break
 
